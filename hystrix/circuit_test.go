@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"math/rand"
+	"testing/quick"
+
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -93,4 +96,55 @@ func TestReportEventOpenThenClose(t *testing.T) {
 			})
 		})
 	})
+}
+
+func TestReportEventMultiThreaded(t *testing.T) {
+	rand.Seed(time.Now().UnixNano())
+	run := func() bool {
+		defer Flush()
+		// Make the circuit easily open and close intermittently.
+		ConfigureCommand("", CommandConfig{
+			MaxConcurrentRequests:  1,
+			ErrorPercentThreshold:  1,
+			RequestVolumeThreshold: 1,
+			SleepWindow:            10,
+		})
+		cb, _, _ := GetCircuit("")
+		count := 5
+		wg := &sync.WaitGroup{}
+		wg.Add(count)
+		c := make(chan bool, count)
+		for i := 0; i < count; i++ {
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Error(r)
+						c <- false
+					} else {
+						wg.Done()
+					}
+				}()
+				// randomized eventType to open/close circuit
+				eventType := "rejected"
+				if rand.Intn(3) == 1 {
+					eventType = "success"
+				}
+				err := cb.ReportEvent([]string{eventType}, time.Now(), time.Second)
+				if err != nil {
+					t.Error(err)
+				}
+				time.Sleep(time.Millisecond)
+				// cb.IsOpen() internally calls cb.setOpen()
+				cb.IsOpen()
+			}()
+		}
+		go func() {
+			wg.Wait()
+			c <- true
+		}()
+		return <-c
+	}
+	if err := quick.Check(run, nil); err != nil {
+		t.Error(err)
+	}
 }
